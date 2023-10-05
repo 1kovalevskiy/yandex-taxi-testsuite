@@ -142,12 +142,6 @@ def _mysql_apply(
             keep_tables=dbconfig.keep_tables,
             truncate_non_empty=dbconfig.truncate_non_empty,
         )
-        # control.apply_queries(
-        #     _mysql_state.wrapper_for(dbconfig.dbname),
-        #     queries,
-        #     keep_tables=dbconfig.keep_tables,
-        #     truncate_non_empty=dbconfig.truncate_non_empty,
-        # )
 
 
 @pytest.fixture(scope='session')

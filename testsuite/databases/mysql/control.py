@@ -50,7 +50,7 @@ class ConnectionWrapper:
 
     def commit(self) -> None:
         self._connection.commit()
-
+    
     def _truncate_non_empty_tables(self) -> typing.Optional[typing.List[str]]:
         cursor = self.cursor()
         with contextlib.closing(cursor):
@@ -60,17 +60,17 @@ class ConnectionWrapper:
                         f'select \'{t}\' as name, count(*) as c from {t}'
                         for (t,) in self.tables
                     ],
-                )
+                )   
                 query = f'select name from ({subquery}) tables where c>0;'
                 cursor.execute(query)
                 return cursor.fetchall()
 
     def apply_queries(
-        self,
-        queries: typing.List[MysqlQuery],
-        keep_tables: typing.List[str] = None,
-        truncate_non_empty: bool = False,
-    ) -> None:
+            self,
+            queries: typing.List[MysqlQuery],
+            keep_tables: typing.List[str] = None,
+            truncate_non_empty: bool = False,
+        ) -> None:
         if not keep_tables:
             keep_tables = []
         with self.cursor() as cursor:
@@ -97,8 +97,7 @@ class ConnectionWrapper:
                     cursor.execute(query.body, args=[])
                 except pymysql.Error as exc:
                     error_message = (
-                        f'MySQL apply query error\n'
-                        f'Query from: {query.source}\n'
+                        f'MySQL apply query error\n' f'Query from: {query.source}\n'
                     )
                     if query.path:
                         error_message += f'File path: {query.path}\n'
@@ -162,7 +161,7 @@ class DatabasesState:
         return ConnectionWrapper(
             self._connections.get_connection(dbname),
             self._connections.get_conninfo(dbname),
-            self._tables.get(dbname),
+            self._tables.get(dbname)
         )
 
     def run_migration(self, dbname: str, path: str):
@@ -177,7 +176,6 @@ class DatabasesState:
         conninfo = self._connections.get_conninfo(dbname)
         _run_script(conninfo, ['-e', f'source {path}'], verbose=self._verbose)
         self._migrations_run.add(key)
-        # self._save_tables(dbname)
 
     @cached_property
     def known_databases(self):
@@ -251,69 +249,3 @@ def _run_script(
 ):
     command = [str(MYSQL_HELPER), *_build_mysql_args(conninfo), *args]
     shell.execute(command, verbose=verbose, command_alias='mysql/script')
-
-
-def _get_db_tables_list(
-    cursor: pymysql.cursors.Cursor,
-    truncate_non_empty: bool,
-) -> typing.Optional[typing.Tuple]:
-    if not _get_db_tables_list.tables:
-        logger.debug('first time')
-        cursor.execute('show tables')
-        _get_db_tables_list.tables = cursor.fetchall()
-
-    if truncate_non_empty:
-        if _get_db_tables_list.tables:
-            subquery = ' union '.join(
-                [
-                    f'select \'{t}\' as name, count(*) as c from {t}'
-                    for (t,) in _get_db_tables_list.tables
-                ],
-            )
-            query = f'select name from ({subquery}) tables where c>0;'
-
-            cursor.execute(query)
-            return cursor.fetchall()
-
-    return _get_db_tables_list.tables
-
-
-_get_db_tables_list.tables = None
-
-
-def apply_queries(
-    connection: ConnectionWrapper,
-    queries: typing.List[MysqlQuery],
-    keep_tables: typing.List[str] = None,
-    truncate_non_empty: bool = False,
-):
-    if not keep_tables:
-        keep_tables = []
-    with connection.cursor() as cursor:
-        tables = _get_db_tables_list(cursor, truncate_non_empty)
-
-        if tables:
-            truncate_sql = ' '.join(
-                [
-                    f'truncate table {t};'
-                    for (t,) in tables
-                    if t not in keep_tables
-                ],
-            )
-            cursor.execute(
-                'set foreign_key_checks=0;'
-                f'{truncate_sql}'
-                'set foreign_key_checks=1;',
-            )
-        for query in queries:
-            try:
-                cursor.execute(query.body, args=[])
-            except pymysql.Error as exc:
-                error_message = (
-                    f'MySQL apply query error\n' f'Query from: {query.source}\n'
-                )
-                if query.path:
-                    error_message += f'File path: {query.path}\n'
-                error_message += '\n' + str(exc)
-                raise exceptions.MysqlError(error_message)
-    connection.commit()
