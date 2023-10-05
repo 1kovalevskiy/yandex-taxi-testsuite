@@ -50,7 +50,7 @@ class ConnectionWrapper:
 
     def commit(self) -> None:
         self._connection.commit()
-    
+
     def _truncate_non_empty_tables(self) -> typing.Optional[typing.List[str]]:
         cursor = self.cursor()
         with contextlib.closing(cursor):
@@ -60,17 +60,17 @@ class ConnectionWrapper:
                         f'select \'{t}\' as name, count(*) as c from {t}'
                         for (t,) in self.tables
                     ],
-                )   
+                )
                 query = f'select name from ({subquery}) tables where c>0;'
                 cursor.execute(query)
                 return cursor.fetchall()
 
     def apply_queries(
-            self,
-            queries: typing.List[MysqlQuery],
-            keep_tables: typing.List[str] = None,
-            truncate_non_empty: bool = False,
-        ) -> None:
+        self,
+        queries: typing.List[MysqlQuery],
+        keep_tables: typing.List[str] = None,
+        truncate_non_empty: bool = False,
+    ) -> None:
         if not keep_tables:
             keep_tables = []
         with self.cursor() as cursor:
@@ -97,7 +97,8 @@ class ConnectionWrapper:
                     cursor.execute(query.body, args=[])
                 except pymysql.Error as exc:
                     error_message = (
-                        f'MySQL apply query error\n' f'Query from: {query.source}\n'
+                        f'MySQL apply query error\n'
+                        f'Query from: {query.source}\n'
                     )
                     if query.path:
                         error_message += f'File path: {query.path}\n'
@@ -161,7 +162,7 @@ class DatabasesState:
         return ConnectionWrapper(
             self._connections.get_connection(dbname),
             self._connections.get_conninfo(dbname),
-            self._tables.get(dbname)
+            self._tables.get(dbname),
         )
 
     def run_migration(self, dbname: str, path: str):
@@ -253,7 +254,8 @@ def _run_script(
 
 
 def _get_db_tables_list(
-        cursor: pymysql.cursors.Cursor, truncate_non_empty: bool,
+    cursor: pymysql.cursors.Cursor,
+    truncate_non_empty: bool,
 ) -> typing.Optional[typing.Tuple]:
     if not _get_db_tables_list.tables:
         logger.debug('first time')
