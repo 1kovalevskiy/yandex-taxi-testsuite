@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import logging
 import pathlib
@@ -28,9 +29,10 @@ class MysqlQuery:
 class ConnectionWrapper:
     """MySQL database connection wrapper."""
 
-    def __init__(self, connection, conninfo):
+    def __init__(self, connection, conninfo, tables):
         self._connection = connection
         self._conninfo = conninfo
+        self._tables: typing.Optional[typing.List[str]] = tables
 
     @property
     def conninfo(self) -> classes.ConnectionInfo:
@@ -48,6 +50,60 @@ class ConnectionWrapper:
 
     def commit(self) -> None:
         self._connection.commit()
+    
+    def _truncate_non_empty_tables(self) -> typing.Optional[typing.List[str]]:
+        cursor = self.cursor()
+        with contextlib.closing(cursor):
+            if self._tables:
+                subquery = ' union '.join(
+                    [
+                        f'select \'{t}\' as name, count(*) as c from {t}'
+                        for (t,) in self.tables
+                    ],
+                )   
+                query = f'select name from ({subquery}) tables where c>0;'
+                cursor.execute(query)
+                return cursor.fetchall()
+
+    def apply_queries(
+            self,
+            queries: typing.List[MysqlQuery],
+            keep_tables: typing.List[str] = None,
+            truncate_non_empty: bool = False,
+        ) -> None:
+        if not keep_tables:
+            keep_tables = []
+        with self.cursor() as cursor:
+            if truncate_non_empty:
+                tables = self._truncate_non_empty_tables()
+            else:
+                tables = self._tables
+
+            if tables:
+                truncate_sql = ' '.join(
+                    [
+                        f'truncate table {t};'
+                        for (t,) in tables
+                        if t not in keep_tables
+                    ],
+                )
+                cursor.execute(
+                    'set foreign_key_checks=0;'
+                    f'{truncate_sql}'
+                    'set foreign_key_checks=1;',
+                )
+            for query in queries:
+                try:
+                    cursor.execute(query.body, args=[])
+                except pymysql.Error as exc:
+                    error_message = (
+                        f'MySQL apply query error\n' f'Query from: {query.source}\n'
+                    )
+                    if query.path:
+                        error_message += f'File path: {query.path}\n'
+                    error_message += '\n' + str(exc)
+                    raise exceptions.MysqlError(error_message)
+        self.commit()
 
 
 class ConnectionCache:
@@ -92,6 +148,7 @@ class DatabasesState:
         self._verbose = verbose
         self._migrations_run = set()
         self._initialized = set()
+        self._tables = dict()
 
     def get_connection(self, dbname: str, create_db: bool = True):
         if dbname not in self._initialized:
@@ -104,6 +161,7 @@ class DatabasesState:
         return ConnectionWrapper(
             self._connections.get_connection(dbname),
             self._connections.get_conninfo(dbname),
+            self._tables.get(dbname)
         )
 
     def run_migration(self, dbname: str, path: str):
@@ -118,6 +176,7 @@ class DatabasesState:
         conninfo = self._connections.get_conninfo(dbname)
         _run_script(conninfo, ['-e', f'source {path}'], verbose=self._verbose)
         self._migrations_run.add(key)
+        # self._save_tables(dbname)
 
     @cached_property
     def known_databases(self):
@@ -134,6 +193,13 @@ class DatabasesState:
             cursor.execute(f'CREATE DATABASE `{dbname}`')
         connection.commit()
         self._initialized.add(dbname)
+
+    def save_tables(self, dbname: str) -> None:
+        connection = self._connections.get_connection(dbname)
+        cursor = connection.cursor()
+        with contextlib.closing(cursor):
+            cursor.execute('show tables')
+            self._tables[dbname] = cursor.fetchall()
 
 
 class Control:
@@ -159,6 +225,7 @@ class Control:
         self._state.get_connection(dbconfig.dbname, create_db=dbconfig.create)
         for path in dbconfig.migrations:
             self._state.run_migration(dbconfig.dbname, path)
+        self._state.save_tables(dbconfig.dbname)
 
 
 def _build_mysql_args(conninfo: classes.ConnectionInfo) -> typing.List[str]:
@@ -186,27 +253,30 @@ def _run_script(
 
 
 def _get_db_tables_list(
-    cursor: pymysql.cursors.Cursor,
-    db_name: typing.Optional[str],
-    truncate_non_empty: bool,
+        cursor: pymysql.cursors.Cursor, truncate_non_empty: bool,
 ) -> typing.Optional[typing.Tuple]:
-    cursor.execute('show tables')
-    tables = cursor.fetchall()
-
-    if not db_name:
-        return tables
+    if not _get_db_tables_list.tables:
+        logger.debug('first time')
+        cursor.execute('show tables')
+        _get_db_tables_list.tables = cursor.fetchall()
 
     if truncate_non_empty:
-        if tables:
-            tables_enum: str = ', '.join([x for (x,) in tables])
-            cursor.execute('analyze no_write_to_binlog table ' + tables_enum)
-            cursor.execute(
-                'select `table_name` from information_schema.tables '
-                'where table_rows >= 1 and '
-                f'table_schema = \'{db_name}\'',
+        if _get_db_tables_list.tables:
+            subquery = ' union '.join(
+                [
+                    f'select \'{t}\' as name, count(*) as c from {t}'
+                    for (t,) in _get_db_tables_list.tables
+                ],
             )
-            tables = cursor.fetchall()
-    return tables
+            query = f'select name from ({subquery}) tables where c>0;'
+
+            cursor.execute(query)
+            return cursor.fetchall()
+
+    return _get_db_tables_list.tables
+
+
+_get_db_tables_list.tables = None
 
 
 def apply_queries(
@@ -218,20 +288,21 @@ def apply_queries(
     if not keep_tables:
         keep_tables = []
     with connection.cursor() as cursor:
-        tables = _get_db_tables_list(
-            cursor,
-            connection.conninfo.dbname,
-            truncate_non_empty,
-        )
+        tables = _get_db_tables_list(cursor, truncate_non_empty)
 
         if tables:
-            for (table,) in tables:
-                if table not in keep_tables:
-                    cursor.execute(
-                        'set foreign_key_checks=0;'
-                        f'truncate table {table};'
-                        'set foreign_key_checks=1;',
-                    )
+            truncate_sql = ' '.join(
+                [
+                    f'truncate table {t};'
+                    for (t,) in tables
+                    if t not in keep_tables
+                ],
+            )
+            cursor.execute(
+                'set foreign_key_checks=0;'
+                f'{truncate_sql}'
+                'set foreign_key_checks=1;',
+            )
         for query in queries:
             try:
                 cursor.execute(query.body, args=[])
